@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Your live config and cached prices are yours; keep them out of git.
+portfolio.yaml
+.cache/
+*.local.yaml
