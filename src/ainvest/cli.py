@@ -15,6 +15,7 @@ from .config import RISK_PROFILES, Config, ConfigError, load_config
 from .custody import review as custody_review
 from .data import PriceCache, load_prices
 from .data.base import ProviderError
+from .events import review as events_review
 from .lots import review as tax_review
 from .optimize.core import InfeasibleError
 from .optimize.objectives import DESCRIPTIONS, OBJECTIVES
@@ -26,6 +27,7 @@ from .report import (
     render_allocation,
     render_backtest,
     render_custody,
+    render_events,
     render_exit_comparison,
     render_footer,
     render_markdown,
@@ -164,7 +166,10 @@ def cmd_rebalance(args) -> int:
         cfg.allow_sells = True
     allocation, prices, _panel, missing, _moments = _build(cfg, args)
     new_cash = args.cash if args.cash is not None else cfg.investable
-    report = plan_rebalance(cfg, allocation, prices, new_cash=new_cash)
+    report = plan_rebalance(
+        cfg, allocation, prices, new_cash=new_cash,
+        approve_sells=args.approve_sells,
+    )
 
     if args.json:
         payload = {
@@ -283,7 +288,13 @@ def cmd_check(args) -> int:
     state = evaluate_signals(cfg, panel, allocation.as_dict())
     print(render_signals(state))
 
-    # 4. Custody.
+    # 4. News, calendar, and the stress gauge.
+    index = portfolio_index(panel, allocation.as_dict())
+    print(render_events(
+        events_review(cfg, panel, index, offline=getattr(args, "offline", False))
+    ))
+
+    # 5. Custody.
     if report.plan is not None:
         print(render_custody(custody_review(cfg, report.plan)))
     print(render_footer())
@@ -403,6 +414,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_reb.add_argument("--cash", type=float, help="new money to add (default: budget)")
     p_reb.add_argument("--allow-sells", action="store_true",
                        help="permit sales; may realise taxable gains")
+    p_reb.add_argument("--approve-sells", action="store_true",
+                       help="explicitly approve selling beyond withdrawal.auto_limit "
+                            "for this run; without it, sells above the programmed "
+                            "allowance are withheld")
     p_reb.add_argument("--json", action="store_true")
     p_reb.set_defaults(func=cmd_rebalance)
 

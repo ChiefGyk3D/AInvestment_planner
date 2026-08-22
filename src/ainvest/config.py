@@ -142,6 +142,48 @@ class SignalSettings:
 
 
 @dataclass
+class WithdrawalSettings:
+    """The hard rule on money leaving the portfolio.
+
+    Plans NEVER propose pulling out more than ``auto_limit`` dollars of sells
+    per run unless the user passes an explicit approval flag -- regardless of
+    what the optimiser, a signal, or a rebalance wants. The default of zero
+    means every dollar of selling needs either a programmed allowance here or
+    an explicit ``--approve-sells`` on the command line. Deposits are the
+    mirror image: the programmed ``contribution`` schedule is the only inflow
+    the tool plans around.
+    """
+
+    auto_limit: float = 0.0
+
+
+@dataclass
+class NewsSettings:
+    """Context shown by `check`: headlines and a user-maintained calendar.
+
+    Deliberately context, never triggers: the allocation is driven by prices
+    and the config, and no headline changes a single order. Reacting to news
+    is one of the best-documented ways retail investors underperform their own
+    holdings. Scheduled events are listed so volatility around them is
+    unsurprising, not so it can be traded.
+    """
+
+    headlines: bool = True
+    max_headlines: int = 4
+    lookahead_days: int = 21
+    timeout_seconds: float = 6.0
+
+
+@dataclass(frozen=True)
+class CalendarEvent:
+    """One entry in the user-maintained events calendar."""
+
+    date: str
+    title: str
+    note: str = ""
+
+
+@dataclass
 class CustodySettings:
     """Rules for when to sweep coins off an exchange into self-custody."""
 
@@ -169,6 +211,9 @@ class Config:
     tax: TaxSettings = field(default_factory=TaxSettings)
     contribution: ContributionSettings = field(default_factory=ContributionSettings)
     signals: SignalSettings = field(default_factory=SignalSettings)
+    withdrawal: WithdrawalSettings = field(default_factory=WithdrawalSettings)
+    news: NewsSettings = field(default_factory=NewsSettings)
+    calendar: list[CalendarEvent] = field(default_factory=list)
     #: months within which a trade's fee must be earned back by the expected
     #: return on the amount traded, or the trade is skipped as not worth it
     fee_payback_months: float = 6.0
@@ -332,6 +377,29 @@ def from_dict(raw: dict[str, Any]) -> Config:
     _fill(cfg.tax, raw.get("tax"), "tax")
     _fill(cfg.contribution, raw.get("contribution"), "contribution")
     _fill(cfg.signals, raw.get("signals"), "signals")
+    _fill(cfg.withdrawal, raw.get("withdrawal"), "withdrawal")
+
+    news_raw = dict(raw.get("news") or {})
+    events_raw = news_raw.pop("events", []) or []
+    _fill(cfg.news, news_raw, "news")
+    if not isinstance(events_raw, list):
+        raise ConfigError("news.events must be a list of {date, title, note} entries")
+    for entry in events_raw:
+        if not isinstance(entry, dict) or "date" not in entry or "title" not in entry:
+            raise ConfigError(
+                f"news.events entry needs at least 'date' and 'title': {entry!r}"
+            )
+        stamp = str(entry["date"])
+        try:
+            date.fromisoformat(stamp)
+        except ValueError as exc:
+            raise ConfigError(
+                f"news.events entry {entry['title']!r} has date {stamp!r}; "
+                "expected an ISO date like 2026-09-17"
+            ) from exc
+        cfg.calendar.append(
+            CalendarEvent(date=stamp, title=str(entry["title"]), note=str(entry.get("note", "")))
+        )
     if "fee_payback_months" in raw:
         cfg.fee_payback_months = _as_float(raw["fee_payback_months"], "fee_payback_months")
     if cfg.contribution.frequency not in {"monthly", "biweekly", "weekly"}:

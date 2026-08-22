@@ -104,7 +104,9 @@ def test_selling_is_opt_in_and_two_sided():
         [{"symbol": "VTI", "quantity": 10.0, "venue": "public"}],
         allow_sells=True,
     )
-    report = plan_rebalance(cfg, EVEN, PRICES, new_cash=0, allow_sells=True)
+    report = plan_rebalance(
+        cfg, EVEN, PRICES, new_cash=0, allow_sells=True, approve_sells=True
+    )
     sides = {t.side for t in report.plan.trades}
     assert "sell" in sides
     assert any("capital gains" in note for note in report.notes)
@@ -115,7 +117,9 @@ def test_sells_never_exceed_what_is_held():
         [{"symbol": "VTI", "quantity": 10.0, "venue": "public"}],
         allow_sells=True,
     )
-    report = plan_rebalance(cfg, EVEN, PRICES, new_cash=0, allow_sells=True)
+    report = plan_rebalance(
+        cfg, EVEN, PRICES, new_cash=0, allow_sells=True, approve_sells=True
+    )
     for trade in report.plan.trades:
         if trade.side == "sell":
             assert trade.quantity <= 10.0 + 1e-9
@@ -139,7 +143,9 @@ def test_a_trade_whose_fee_fails_the_payback_gate_is_skipped():
         {"symbol": "ETH", "quantity": 0.04, "venue": "coinbase_advanced"},  # $100
     ]
     cfg = from_dict(raw)
-    report = plan_rebalance(cfg, EVEN, PRICES, new_cash=0, allow_sells=True)
+    report = plan_rebalance(
+        cfg, EVEN, PRICES, new_cash=0, allow_sells=True, approve_sells=True
+    )
     assert any("payback gate" in reason for _, reason in report.skipped), report.skipped
     assert not any(t.symbol == "VTI" for t in report.plan.trades)
 
@@ -167,7 +173,9 @@ def test_selling_a_gain_surfaces_its_estimated_tax():
         "cost_basis": 400.0, "acquired": acquired,  # $1000 value, $600 LT gain
     }]
     cfg = from_dict(raw)
-    report = plan_rebalance(cfg, EVEN, PRICES, new_cash=0, allow_sells=True)
+    report = plan_rebalance(
+        cfg, EVEN, PRICES, new_cash=0, allow_sells=True, approve_sells=True
+    )
     assert any("realises an estimated" in n for n in report.notes), report.notes
 
 
@@ -188,3 +196,82 @@ def test_rebalance_uses_the_optimised_target(cfg, moments, latest):
     assert report.plan is not None
     assert report.plan.trades
     assert all(t.side == "buy" for t in report.plan.trades)
+
+
+class TestWithdrawalPolicy:
+    """Money never leaves beyond the programmed allowance without consent."""
+
+    def holdings(self):
+        return [{"symbol": "VTI", "quantity": 10.0, "venue": "public"}]  # 100% VTI
+
+    def test_default_allowance_withholds_every_sell(self):
+        cfg = config_with(self.holdings(), allow_sells=True)
+        assert cfg.withdrawal.auto_limit == 0.0
+        report = plan_rebalance(cfg, EVEN, PRICES, new_cash=0, allow_sells=True)
+        assert not any(t.side == "sell" for t in report.plan.trades)
+        assert any("withheld pending your approval" in r for _, r in report.skipped)
+        assert any("--approve-sells" in n for n in report.notes)
+
+    def test_a_programmed_allowance_is_spent_but_never_exceeded(self):
+        cfg = config_with(self.holdings(), allow_sells=True,
+                          withdrawal={"auto_limit": 150.0})
+        report = plan_rebalance(cfg, EVEN, PRICES, new_cash=0, allow_sells=True)
+        sold = sum(t.notional for t in report.plan.trades if t.side == "sell")
+        assert 0 < sold <= 150.0 + 1e-9
+
+    def test_explicit_approval_lifts_the_allowance(self):
+        cfg = config_with(self.holdings(), allow_sells=True)
+        report = plan_rebalance(
+            cfg, EVEN, PRICES, new_cash=0, allow_sells=True, approve_sells=True
+        )
+        sold = sum(t.notional for t in report.plan.trades if t.side == "sell")
+        assert sold > 150.0
+        assert not any("withheld" in r for _, r in report.skipped)
+
+    def test_cash_flow_mode_is_untouched_by_the_policy(self):
+        """Buy-only rebalancing never sells, so the policy has nothing to do."""
+        cfg = config_with(self.holdings())
+        report = plan_rebalance(cfg, EVEN, PRICES, new_cash=200)
+        assert all(t.side == "buy" for t in report.plan.trades)
+
+
+class TestFundedBuys:
+    """Buys may only spend new cash plus what the sells actually raised."""
+
+    def test_buys_cannot_outspend_the_proceeds(self):
+        """With the allowance capping sells, the buy side must shrink too --
+        the bug this guards against proposed $216 of buys on $40 of sells."""
+        cfg = config_with(
+            [{"symbol": "VTI", "quantity": 10.0, "venue": "public"}],
+            allow_sells=True, withdrawal={"auto_limit": 50.0},
+        )
+        report = plan_rebalance(cfg, EVEN, PRICES, new_cash=0, allow_sells=True)
+        plan = report.plan
+        sells = sum(t.notional for t in plan.trades if t.side == "sell")
+        buys = sum(t.notional + t.fee for t in plan.trades if t.side == "buy")
+        assert buys <= sells - sum(
+            t.fee for t in plan.trades if t.side == "sell"
+        ) + 1e-6
+        assert plan.cash_left >= -1e-6
+
+    def test_approved_rebalance_is_also_self_funding(self):
+        cfg = config_with(
+            [{"symbol": "VTI", "quantity": 10.0, "venue": "public"}],
+            allow_sells=True,
+        )
+        report = plan_rebalance(
+            cfg, EVEN, PRICES, new_cash=0, allow_sells=True, approve_sells=True
+        )
+        assert report.plan.cash_left >= -1e-6
+
+    def test_new_cash_joins_the_proceeds(self):
+        cfg = config_with(
+            [{"symbol": "VTI", "quantity": 10.0, "venue": "public"}],
+            allow_sells=True, withdrawal={"auto_limit": 100.0},
+        )
+        report = plan_rebalance(cfg, EVEN, PRICES, new_cash=300, allow_sells=True)
+        plan = report.plan
+        sells = sum(t.notional - t.fee for t in plan.trades if t.side == "sell")
+        buys = sum(t.notional + t.fee for t in plan.trades if t.side == "buy")
+        assert buys <= 300 + sells + 1e-6
+        assert buys > sells  # the new cash was actually used

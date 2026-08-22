@@ -187,6 +187,32 @@ tax:
   long_term_boundary_days: 45  # warn before selling a gain this close to long-term
 
 
+withdrawal:
+  # THE HARD RULE ON MONEY LEAVING THE PORTFOLIO. A plan will never propose
+  # selling more than this many dollars per run unless you explicitly pass
+  # --approve-sells. Zero means every sale beyond $0 needs that flag. This is
+  # the counterpart of the contribution schedule above: deposits are
+  # programmed in; withdrawals beyond the programmed allowance always ask.
+  auto_limit: 0
+
+
+news:
+  # Context shown by `ainvest check`. Headlines and calendar entries NEVER
+  # change a plan -- reacting to news is one of the best-documented ways
+  # retail investors underperform their own holdings. The one quantitative
+  # item, the stress gauge, is computed from prices and works offline.
+  headlines: true       # fetch per-asset RSS headlines (skipped with --offline)
+  max_headlines: 4
+  lookahead_days: 21    # how far ahead the calendar looks
+  # Your own calendar of known dates: Fed meetings, CPI prints, an expected
+  # protocol upgrade. Listed so volatility around them is unsurprising.
+  events: []
+  # events:
+  #   - date: 2026-09-17
+  #     title: FOMC rate decision
+  #     note: volatility likely; contributions proceed as scheduled
+
+
 signals:
   # Alerts computed by `ainvest check`. They never place or suggest sells on
   # their own; run `ainvest backtest --exit-rule trend` to see what acting on

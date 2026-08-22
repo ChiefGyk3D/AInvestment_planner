@@ -456,3 +456,31 @@ def render_exit_comparison(results, cfg: Config) -> str:
         f"bill ({cfg.tax.long_term_rate:.0%})."
     )
     return "\n".join(out)
+
+
+def render_events(report) -> str:
+    """Render an events.EventsReport."""
+    out = [_heading("News & events (context, never triggers)")]
+    if report.stress is not None:
+        level = "ELEVATED" if report.stress.elevated else "normal"
+        out.append(
+            f"  market stress: {level} -- realised vol {report.stress.current_vol:.0%} "
+            f"annualised, {report.stress.ratio:.1f}x this portfolio's median, "
+            f"p{report.stress.percentile * 100:.0f} of its history"
+        )
+    if report.upcoming:
+        out.append("\n  Scheduled:")
+        for event, days in report.upcoming:
+            when = "today" if days == 0 else f"in {days} day(s)"
+            note = f" -- {event.note}" if event.note else ""
+            out.append(f"    {event.date}  {event.title} ({when}){note}")
+    if report.headlines:
+        out.append("\n  Headlines:")
+        for h in report.headlines:
+            stamp = f" [{h.published}]" if h.published else ""
+            out.append(f"    {h.symbol}: {h.title}{stamp}")
+    if not report.upcoming and not report.headlines and report.stress is None:
+        out.append("  nothing to report")
+    for note in report.notes:
+        out.append(f"  * {note}")
+    return "\n".join(out)

@@ -124,6 +124,24 @@ def test_unknown_tax_key_is_reported():
         from_dict({**base_config(), "tax": {"shortterm": 0.3}})
 
 
+def test_withdrawal_and_news_sections_parse():
+    cfg = from_dict({
+        **base_config(),
+        "withdrawal": {"auto_limit": 75},
+        "news": {"headlines": False, "lookahead_days": 10,
+                 "events": [{"date": "2026-12-01", "title": "CPI"}]},
+    })
+    assert cfg.withdrawal.auto_limit == 75.0
+    assert cfg.news.headlines is False
+    assert cfg.news.lookahead_days == 10
+    assert cfg.calendar[0].title == "CPI"
+
+
+def test_withdrawal_allowance_defaults_to_zero():
+    """The safe default: no programmed allowance means always ask."""
+    assert from_dict(base_config()).withdrawal.auto_limit == 0.0
+
+
 def test_cash_reserve_is_held_back():
     cfg = from_dict({**base_config(), "budget": 500, "cash_reserve": 200})
     assert cfg.investable == 300

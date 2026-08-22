@@ -307,6 +307,43 @@ loses after costs. If it loses on yours, you have your answer; if it wins, you
 at least know what the bet is. The drawdown alert exists for the opposite
 reason: historically, well below the peak is where contributions buy the most.
 
+### News and events — context, never triggers
+
+`check` includes a **News & events** section with three layers:
+
+- **Market stress gauge** (offline, quantitative): the portfolio's realised
+  volatility versus its own history. When it's in the top decile, the output
+  says so — and says the plan doesn't change, because news that matters shows
+  up in prices, and selling into stress is how drawdowns become losses.
+- **Your calendar** (`news.events` in the config): FOMC dates, CPI prints, an
+  expected protocol upgrade — listed with days-to-go so volatility around
+  them is unsurprising rather than actionable.
+- **Headlines** (network, best-effort): per-asset RSS via Yahoo Finance. A
+  dead network degrades to "no headlines", never to a failed check; `--offline`
+  skips the fetch entirely.
+
+The design stance is explicit in the code and the output: no headline changes
+a single order. Reacting to news is one of the best-documented ways retail
+investors underperform their own holdings, so this tool shows you the context
+and then tells you it's context.
+
+### The withdrawal policy — money never leaves without consent
+
+A hard rule, not a preference: plans will **never propose selling more than
+`withdrawal.auto_limit` dollars per run** (default **$0**) unless you pass
+`--approve-sells` for that specific run. Deposits are the mirror image — the
+programmed `contribution` schedule is the only inflow the tool plans around.
+
+Sells beyond the allowance are *withheld*, listed with a "pending your
+approval" reason, and the buy side shrinks to match — buys can only spend new
+cash plus what the permitted sells actually raised. Approving is always a
+deliberate act:
+
+```bash
+ainvest rebalance --allow-sells                  # sells capped at the allowance
+ainvest rebalance --allow-sells --approve-sells  # you said so, this run only
+```
+
 ### Long-run expectations
 
 ```bash
@@ -350,6 +387,10 @@ explained in the output:
 - It won't run a backtest without enough history to hold half of it out of
   sample.
 - It tells you when constraints are impossible, and which knob to turn.
+- It won't propose pulling out more than the programmed withdrawal allowance
+  without an explicit per-run approval flag.
+- It won't turn a headline, a calendar entry, or its own stress gauge into a
+  trade.
 
 **And the honest limitations:**
 
@@ -368,7 +409,7 @@ explained in the output:
 
 ```bash
 pip install -e '.[dev]'
-pytest                 # 208 tests, no network needed
+pytest                 # 232 tests, no network needed
 ruff check .
 ```
 
@@ -386,6 +427,10 @@ offline. Notable ones:
   market the exit rule can only tie or lose after costs.
 - `test_lots.py` pins the wash-sale window arithmetic, HIFO ordering, the
   long-term boundary maths, and the crypto exemption toggle.
+- `test_rebalance.py::TestWithdrawalPolicy` proves sells are withheld at the
+  default $0 allowance, capped at a programmed one, and released only by
+  explicit approval; `TestFundedBuys` proves buys can never outspend new cash
+  plus actual sell proceeds.
 
 ## License
 

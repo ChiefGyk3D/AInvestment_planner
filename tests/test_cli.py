@@ -160,6 +160,38 @@ def test_check_runs_the_whole_monthly_review(workspace, capsys):
     assert "NOT FINANCIAL ADVICE" in out
 
 
+def test_check_shows_events_and_never_fetches_offline(workspace, capsys):
+    from datetime import date, timedelta
+    raw = yaml.safe_load(workspace.read_text())
+    raw["news"] = {"events": [{
+        "date": (date.today() + timedelta(days=4)).isoformat(),
+        "title": "FOMC rate decision",
+    }]}
+    workspace.write_text(yaml.safe_dump(raw))
+    assert run(["fetch"], workspace) == 0  # warm the cache so --offline has data
+    capsys.readouterr()
+    assert run(["check", "--offline"], workspace) == 0
+    out = capsys.readouterr().out
+    assert "News & events (context, never triggers)" in out
+    assert "FOMC rate decision" in out
+    assert "offline: headline fetch skipped" in out
+
+
+def test_rebalance_withholds_sells_without_approval(workspace, capsys):
+    raw = yaml.safe_load(workspace.read_text())
+    raw["holdings"] = [{"symbol": "VTI", "quantity": 5.0, "venue": "public"}]
+    raw["allow_sells"] = True
+    workspace.write_text(yaml.safe_dump(raw))
+    assert run(["rebalance", "--cash", "0", "--json"], workspace) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert not any(o["side"] == "sell" for o in payload["orders"])
+    assert any("withheld" in item["reason"] for item in payload["skipped"])
+    capsys.readouterr()
+    assert run(["rebalance", "--cash", "0", "--approve-sells", "--json"], workspace) == 0
+    approved = json.loads(capsys.readouterr().out)
+    assert any(o["side"] == "sell" for o in approved["orders"])
+
+
 def test_project_reports_percentile_bands(workspace, capsys):
     assert run(["project", "--years", "3", "--paths", "300"], workspace) == 0
     out = capsys.readouterr().out
