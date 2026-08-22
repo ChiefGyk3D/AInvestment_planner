@@ -104,13 +104,15 @@ is real.)
 | --- | --- |
 | `ainvest init` | Write a starter `portfolio.yaml` |
 | `ainvest optimize` | Target weights plus the orders to reach them |
+| `ainvest check` | **The monthly ritual**: contribution plan, tax review, signals, custody — one command |
 | `ainvest rebalance` | Trades to steer existing holdings back toward target |
+| `ainvest project` | Monte Carlo wealth bands over 1/5/10 years; lump-sum vs DCA |
 | `ainvest backtest` | Walk the objective forward through history |
 | `ainvest explain` | Returns, volatilities, correlations, objective reference |
 | `ainvest fetch` | Refresh or inspect the local price cache |
 
 Useful flags: `--budget`, `--objective`, `--profile`, `--json`, `--markdown`,
-`--offline`, `--refresh`.
+`--offline`, `--refresh`, `backtest --exit-rule trend`, `project --dca-months 6`.
 
 `--json` output is stable and meant for scripting.
 
@@ -230,6 +232,93 @@ Assets are only ever recommended for withdrawal if you marked them
 `supports_withdrawal: true` — some retail venues sell price exposure rather than
 the coin itself, and a balance you cannot withdraw is not self-custody.
 
+## The steady-investment loop
+
+The intended workflow is one command a month:
+
+```bash
+ainvest check
+```
+
+which answers, in order: where does this month's contribution go (always toward
+whatever is furthest below target — rebalancing with new money instead of
+sales), what does your tax position look like, what are the signals saying,
+and is anything worth sweeping to the Trezor.
+
+### Taxes: lots, harvesting, and wash sales
+
+Holdings are **tax lots** — one entry per purchase with its cost basis and
+date — because that's the level tax reality operates at. The same symbol can
+hold a harvestable loss and an untouchable gain at once. With lots recorded,
+`check` reports:
+
+- **Harvest candidates**: lots underwater by more than `harvest_min_loss`,
+  with the estimated tax saving at your marginal rate, and what to do during
+  the 30-day wash window (swap into the configured `tlh_replacement`, e.g.
+  VTI→VOO, or sit out).
+- **Wash-sale conflicts**: a loss you *can't* harvest yet because a recent buy
+  of the same asset sits inside the window — with the number of days until it
+  clears. Crypto is treated as wash-exempt (current US treatment) unless you
+  set `tax.crypto_wash_sale: true`; the output reminds you that this is a
+  recurring legislative target.
+- **Long-term boundary warnings**: a gain that would be taxed at 24% today but
+  15% in 20 days gets a "wait 20 days, save $X" line before you sell it.
+
+When selling *is* enabled, every proposed sale's estimated tax (HIFO lot
+order) is counted as part of the trade's cost, and a sale whose tax swamps the
+correction is skipped with the reason printed.
+
+Set both tax rates to zero for a sheltered account and all of this stands down.
+
+### The fee-payback gate
+
+Every rebalancing trade must earn its fee back within `fee_payback_months`
+(default 6) at the portfolio's expected return, or it is skipped with the
+arithmetic shown. This is the formal version of "don't make trades that cost
+more in fees than they can plausibly return."
+
+### "When to put money in"
+
+Steadily, per the configured schedule — that is the whole engine. Two optional
+refinements, both visible in `check`:
+
+- `contribution.reserve_fraction` holds back a slice of each contribution as
+  dry powder, flagged for deployment when the portfolio falls
+  `deploy_on_drawdown` below its peak (buying more when things are down,
+  systematically rather than emotionally).
+- `ainvest project --dca-months 6` compares deploying a lump sum now versus
+  spreading it, on your own portfolio's bootstrapped history. History usually
+  favours *sooner*; the output says by how much and how often.
+
+### "When to pull out" — the honest answer
+
+The tool computes a trend signal (portfolio vs its 200-day average) and a
+drawdown alert, and it will **never** turn either into a sell order. Instead:
+
+```bash
+ainvest backtest --exit-rule trend
+```
+
+runs the exit rule against staying invested **with taxes and fees charged on
+every exit** — exits realise gains at up to your short-term rate, while
+staying in defers a single long-term bill — and liquidates both at the end so
+unrealised gains can't flatter either side. On most histories the exit rule
+loses after costs. If it loses on yours, you have your answer; if it wins, you
+at least know what the bet is. The drawdown alert exists for the opposite
+reason: historically, well below the peak is where contributions buy the most.
+
+### Long-run expectations
+
+```bash
+ainvest project --years 10
+```
+
+block-bootstraps your portfolio's own returns into thousands of paths with
+your contribution schedule applied, and prints wealth bands (p10 through p90),
+the probability of ending below what you paid in, and the median worst
+drawdown along the way. The p10 column is printed at the same width as the
+p90 column on purpose.
+
 ## Data
 
 | Provider | Use |
@@ -266,8 +355,10 @@ explained in the output:
 
 - Historical estimates are the only input. Two years of data is a small sample,
   and the future is not obliged to resemble it.
-- There is no tax-lot tracking, no wash-sale detection, and no tax-loss
-  harvesting. If you enable selling in a taxable account, that's on you.
+- Tax analysis is a two-rate estimate on the lots you record. It ignores
+  netting order, thresholds, state tax, and every purchase this config can't
+  see (other accounts, spousal accounts, IRAs — all of which count for wash
+  sales). It flags conversations to have, it does not replace having them.
 - The backtest is a sanity check on the *method*, not a forecast. It has no
   slippage model and assumes you can transact at closing prices.
 - At a few hundred dollars, how much you contribute and whether you leave it
@@ -277,7 +368,7 @@ explained in the output:
 
 ```bash
 pip install -e '.[dev]'
-pytest                 # 160 tests, no network needed
+pytest                 # 208 tests, no network needed
 ruff check .
 ```
 
@@ -290,7 +381,11 @@ offline. Notable ones:
 - `test_objectives.py` checks each objective against a 30,000-sample brute-force
   search, and verifies every analytic gradient against finite differences.
 - `test_backtest.py::test_no_lookahead` rewrites all prices after a cut-off date
-  and asserts the equity curve before it doesn't move by a basis point.
+  and asserts the equity curve before it doesn't move by a basis point; the
+  trend overlay has its own equivalent, plus a proof that in a straight-up
+  market the exit rule can only tie or lose after costs.
+- `test_lots.py` pins the wash-sale window arithmetic, HIFO ordering, the
+  long-term boundary maths, and the crypto exemption toggle.
 
 ## License
 

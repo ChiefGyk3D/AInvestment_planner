@@ -78,6 +78,9 @@ assets:
     asset_class: equity
     venues: [public]
     max_weight: 0.60
+    # a similar-but-not-identical fund to hold through a wash-sale window
+    # after harvesting a loss here
+    tlh_replacement: VOO
 
   - symbol: VXUS
     name: Total international stock market
@@ -155,13 +158,56 @@ custody:
   max_fee_fraction: 0.02  # or one where the network fee exceeds 2% of it
 
 
-# What you already own. Fill this in and use `ainvest rebalance`.
+# The trade-worthiness gate: a trade's fee must be earned back within this
+# many months by the expected return on the amount traded, or it is skipped.
+fee_payback_months: 6
+
+
+contribution:
+  # The steady-investment engine. `ainvest check` plans where each
+  # contribution goes -- always toward whatever is furthest below target.
+  amount: 100
+  frequency: monthly      # monthly | biweekly | weekly
+  reserve_fraction: 0.0   # e.g. 0.25 holds a quarter back as dry powder...
+  deploy_on_drawdown: 0.15  # ...flagged for deployment on a 15% drawdown
+
+
+tax:
+  # Marginal rates, used to estimate what selling costs and what a harvested
+  # loss saves. Set both to 0 for a tax-sheltered account. These are YOUR
+  # brackets -- look them up.
+  short_term_rate: 0.24
+  long_term_rate: 0.15
+  harvest_min_loss: 25    # ignore losses smaller than this
+  harvest_min_saving: 5   # ...or saving less tax than this
+  wash_sale_days: 30
+  # US law applies the wash-sale rule to "securities", which so far has not
+  # included crypto -- but that is a recurring legislative target. Verify.
+  crypto_wash_sale: false
+  long_term_boundary_days: 45  # warn before selling a gain this close to long-term
+
+
+signals:
+  # Alerts computed by `ainvest check`. They never place or suggest sells on
+  # their own; run `ainvest backtest --exit-rule trend` to see what acting on
+  # the trend signal would actually have cost after tax.
+  trend_days: 200
+  drawdown_alert: 0.20
+
+
+# What you already own, AS TAX LOTS: one entry per purchase, not one per
+# symbol. cost_basis is the total paid for that lot (fees included);
+# acquired is the purchase date. Both are what make tax analysis possible.
 holdings: []
 # holdings:
 #   - symbol: VTI
 #     quantity: 0.42
 #     venue: public
+#     cost_basis: 118.50        # total dollars paid for this lot
+#     acquired: 2025-11-03
 #   - symbol: BTC
 #     quantity: 0.0015
 #     venue: coinbase_advanced
+#     cost_basis: 97.20
+#     acquired: 2026-02-14
 '''

@@ -84,7 +84,7 @@ def render_allocation(allocation: Allocation, moments: Moments | None = None) ->
     return "\n".join(out)
 
 
-def render_plan(plan: Plan, cfg: Config | None = None) -> str:
+def render_plan(plan: Plan, cfg: Config | None = None, *, show_tracking: bool = True) -> str:
     out = [_heading("Orders to place")]
     if not plan.trades:
         out.append("  (no orders)")
@@ -105,7 +105,7 @@ def render_plan(plan: Plan, cfg: Config | None = None) -> str:
         f"fees ${plan.total_fees:,.2f} ({plan.fee_drag_bps:,.0f} bps) | "
         f"cash left ${plan.cash_left:,.2f}"
     )
-    drift = tracking_error(plan)
+    drift = tracking_error(plan) if show_tracking else 0.0
     if drift > 0.005:
         out.append(
             f"  rounding and minimums moved you {drift:.1%} away from the target "
@@ -137,7 +137,9 @@ def render_rebalance(report: RebalanceReport) -> str:
         f"largest drift {report.max_drift:.1%}"
     )
     if report.plan is not None:
-        out.append(render_plan(report.plan))
+        # A contribution's trades are a step toward the target, not the whole
+        # target, so the tracking-error line would be misleading here.
+        out.append(render_plan(report.plan, show_tracking=False))
     if report.skipped:
         out.append("\n  Skipped:")
         for symbol, reason in report.skipped:
@@ -320,3 +322,137 @@ def render_markdown(cfg: Config, allocation: Allocation, plan: Plan) -> str:
         f"_{DISCLAIMER}_",
     ]
     return "\n".join(lines)
+
+
+def render_tax(report) -> str:
+    """Render a lots.TaxReport."""
+    out = [_heading("Tax review")]
+    if report.harvest:
+        rows = []
+        for c in report.harvest:
+            action = "WAIT (wash)" if c.wash_risk else "HARVEST"
+            if not c.wash_applies:
+                swap = "may rebuy immediately (no wash rule applied)"
+            elif c.replacement:
+                swap = f"swap into {c.replacement}"
+            else:
+                swap = "sit out 31 days"
+            rows.append([
+                action, c.symbol,
+                f"${c.view.value:,.2f}", f"${-c.view.gain:,.2f}",
+                f"${c.tax_saving:,.2f}", swap,
+            ])
+        out.append(table(
+            ["action", "asset", "value", "loss", "est. tax saved", "then"], rows
+        ))
+        out.append(
+            f"\n  harvestable losses ${report.total_harvestable_loss:,.2f} | "
+            f"estimated tax saving ${report.total_tax_saving:,.2f}"
+        )
+        for c in report.harvest:
+            if c.wash_risk:
+                out.append(f"  ! {c.symbol}: {c.wash_risk}")
+    else:
+        out.append("  no harvestable losses right now -- which is good news: it "
+                   "means nothing you hold is meaningfully underwater")
+    for w in report.warnings:
+        out.append(f"  ! {w}")
+    if report.unknown_basis:
+        out.append(
+            f"  ? no cost basis recorded for: {', '.join(sorted(set(report.unknown_basis)))} "
+            "-- add `cost_basis` and `acquired` to those holdings to enable tax analysis"
+        )
+    for note in report.notes:
+        out.append(f"  * {note}")
+    return "\n".join(out)
+
+
+def render_signals(state) -> str:
+    """Render a signals.SignalState."""
+    out = [_heading("Signals")]
+    trend = "-"
+    if state.trend_days > 0:
+        side = "above" if state.above_trend else "BELOW"
+        trend = f"{side} the {state.trend_days}-day average by {abs(state.trend_gap):.1%}"
+    out.append(f"  trend:    {trend}")
+    dd = f"{state.drawdown:.1%} from peak"
+    if state.in_drawdown_alert:
+        dd += f"  (past the {state.drawdown_alert:.0%} alert level)"
+    out.append(f"  drawdown: {dd}")
+    if state.deploy_reserve:
+        out.append("  reserve:  flagged for deployment")
+    for note in state.notes:
+        out.append(f"  * {note}")
+    return "\n".join(out)
+
+
+def render_projection(report, cfg: Config) -> str:
+    """Render a project.ProjectionReport."""
+    out = [_heading("Projection (block-bootstrap Monte Carlo)")]
+    if report.results:
+        first = report.results[0]
+        out.append(
+            f"  start ${first.start:,.0f}, adding ${first.contribution_per_year:,.0f}/year "
+            f"({cfg.contribution.frequency}), {first.paths} paths\n"
+        )
+        rows = []
+        for r in report.results:
+            rows.append([
+                r.label, f"${r.total_contributed:,.0f}",
+                f"${r.wealth[10]:,.0f}", f"${r.wealth[25]:,.0f}",
+                f"${r.wealth[50]:,.0f}", f"${r.wealth[75]:,.0f}",
+                f"${r.wealth[90]:,.0f}",
+                f"{r.probability_of_loss:.0%}", f"{r.median_max_drawdown:.0%}",
+            ])
+        out.append(table(
+            ["horizon", "paid in", "p10", "p25", "median", "p75", "p90",
+             "P(below paid-in)", "median worst dip"],
+            rows,
+        ))
+        out.append(
+            "\n  Read the p10 column as seriously as the p90 one: both are "
+            "ordinary outcomes, not edge cases."
+        )
+    if report.dca_comparison:
+        out.append("\n  Lump sum vs spreading it out:")
+        for label, value in report.dca_comparison:
+            if "wins" in label:
+                out.append(f"    {label}: {value:.0%} of paths")
+            else:
+                out.append(f"    {label}: ${value:,.0f}")
+        out.append(
+            "    (history favours investing available cash sooner; spreading it "
+            "buys smaller regret in bad starts, not higher returns)"
+        )
+    for w in report.warnings:
+        out.append(f"\n  ! {w}")
+    return "\n".join(out)
+
+
+def render_exit_comparison(results, cfg: Config) -> str:
+    """Render signals.OverlayResult list: exit rule vs staying invested."""
+    out = [_heading("Exit rule vs staying invested (all costs charged)")]
+    rows = []
+    for r in results:
+        rows.append([
+            r.label,
+            f"{r.total_return:+.1%}",
+            f"{r.after_liquidation_return:+.1%}",
+            str(r.exits),
+            f"{r.days_in_market:.0%}",
+            f"{(r.taxes_paid + r.final_liquidation_tax):.2%}",
+            f"{r.fees_paid:.2%}",
+        ])
+    out.append(table(
+        ["strategy", "return", "after cash-out", "round trips",
+         "time in market", "tax (of start)", "fees (of start)"],
+        rows,
+    ))
+    out.append(
+        "\n  'after cash-out' liquidates both strategies at the end and pays the "
+        "tax due, so unrealised gains cannot flatter either side. Exits realise "
+        "gains early at up to the short-term rate "
+        f"({cfg.tax.short_term_rate:.0%}); staying in defers a single long-term "
+        f"bill ({cfg.tax.long_term_rate:.0%})."
+    )
+    return "\n".join(out)

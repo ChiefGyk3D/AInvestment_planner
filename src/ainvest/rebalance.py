@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .config import Config
+from .lots import cost_of_selling
 from .models import Allocation, Holding, Plan, Trade
 from .plan import notional_for_budget
 
@@ -88,10 +89,19 @@ def plan_rebalance(
     plan = Plan(allocation=allocation, budget=new_cash)
     band = cfg.rebalance_band
 
+    # The fee-payback gate: a trade must earn its fee back within
+    # cfg.fee_payback_months at the portfolio's expected return, or it is not
+    # worth placing. The rate is floored so a bearish return estimate does not
+    # veto every trade -- the gate is about proportion, not forecasting.
+    benefit_rate = max(allocation.expected_return, 0.03)
+    max_fee_fraction = benefit_rate * cfg.fee_payback_months / 12.0
+
     if allow_sells:
-        _two_sided(cfg, report, plan, prices, total, targets, values, band)
+        _two_sided(cfg, report, plan, prices, total, targets, values, band,
+                   max_fee_fraction)
     else:
-        _cash_flow(cfg, report, plan, prices, total, targets, values, new_cash, band)
+        _cash_flow(cfg, report, plan, prices, total, targets, values, new_cash, band,
+                   max_fee_fraction)
 
     buys = sum(t.notional for t in plan.trades if t.side == "buy")
     plan.deployed = buys
@@ -108,7 +118,8 @@ def plan_rebalance(
     return report
 
 
-def _cash_flow(cfg, report, plan, prices, total, targets, values, new_cash, band) -> None:
+def _cash_flow(cfg, report, plan, prices, total, targets, values, new_cash, band,
+               max_fee_fraction) -> None:
     """Direct new money at whatever is furthest below target. No selling."""
     shortfalls = []
     for symbol, weight in targets.items():
@@ -153,6 +164,16 @@ def _cash_flow(cfg, report, plan, prices, total, targets, values, new_cash, band
             continue
         notional = quantity * price
         fee = venue.cost(notional)
+        if fee > notional * max_fee_fraction:
+            months = 12.0 * fee / (notional * max(max_fee_fraction, 1e-9)) \
+                * (cfg.fee_payback_months / 12.0)
+            report.skipped.append(
+                (symbol,
+                 f"the ${fee:,.2f} fee would take ~{months:.0f} months of expected "
+                 f"return to earn back (limit: {cfg.fee_payback_months:.0f}); "
+                 "skipped as not worth it at this size")
+            )
+            continue
         plan.trades.append(
             Trade(symbol=symbol, side="buy", venue=venue.name, notional=notional,
                   quantity=quantity, price=price, fee=fee)
@@ -160,7 +181,8 @@ def _cash_flow(cfg, report, plan, prices, total, targets, values, new_cash, band
         remaining -= notional + fee
 
 
-def _two_sided(cfg, report, plan, prices, total, targets, values, band) -> None:
+def _two_sided(cfg, report, plan, prices, total, targets, values, band,
+               max_fee_fraction) -> None:
     """Sell overweights and buy underweights. Only when explicitly enabled."""
     report.notes.append(
         "selling is enabled: these trades can realise capital gains and, in a "
@@ -192,9 +214,32 @@ def _two_sided(cfg, report, plan, prices, total, targets, values, band) -> None:
             continue
         notional = quantity * price
         fee = venue.cost(notional)
-        if fee > 0.25 * notional:
+        friction = fee
+        if side == "sell":
+            # Selling can trigger tax; that is part of the trade's real cost.
+            tax, tax_notes = cost_of_selling(cfg, symbol, notional, prices)
+            friction += tax
+            for note in tax_notes:
+                if note not in report.notes:
+                    report.notes.append(note)
+            if tax > 0:
+                report.notes.append(
+                    f"selling ${notional:,.2f} of {symbol} realises an estimated "
+                    f"${tax:,.2f} of tax (HIFO lot order assumed)"
+                )
+        if friction > notional * max(max_fee_fraction, 0.0) and friction > fee:
             report.skipped.append(
-                (symbol, f"fee ${fee:,.2f} is more than a quarter of the ${notional:,.2f} trade")
+                (symbol,
+                 f"fees plus an estimated ${friction - fee:,.2f} of tax exceed what "
+                 f"this ${notional:,.2f} correction is worth; drift can also be "
+                 "fixed for free by pointing new contributions here")
+            )
+            continue
+        if fee > notional * max_fee_fraction:
+            report.skipped.append(
+                (symbol,
+                 f"the ${fee:,.2f} fee fails the {cfg.fee_payback_months:.0f}-month "
+                 "payback gate for this trade size")
             )
             continue
         plan.trades.append(

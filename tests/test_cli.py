@@ -144,6 +144,54 @@ def test_rebalance_with_holdings(workspace, capsys):
     assert all(o["side"] == "buy" for o in payload["orders"])
 
 
+def test_check_runs_the_whole_monthly_review(workspace, capsys):
+    raw = yaml.safe_load(workspace.read_text())
+    raw["holdings"] = [{
+        "symbol": "VTI", "quantity": 1.0, "venue": "public",
+        "cost_basis": 500.0, "acquired": "2025-01-15",
+    }]
+    workspace.write_text(yaml.safe_dump(raw))
+    assert run(["check"], workspace) == 0
+    out = capsys.readouterr().out
+    assert "Portfolio check" in out
+    assert "contribution" in out
+    assert "Tax review" in out
+    assert "Signals" in out
+    assert "NOT FINANCIAL ADVICE" in out
+
+
+def test_project_reports_percentile_bands(workspace, capsys):
+    assert run(["project", "--years", "3", "--paths", "300"], workspace) == 0
+    out = capsys.readouterr().out
+    assert "Monte Carlo" in out
+    assert "median" in out
+    assert "p10" in out
+
+
+def test_project_json_is_valid(workspace, capsys):
+    assert run(
+        ["project", "--years", "3", "--paths", "200", "--dca-months", "3", "--json"],
+        workspace,
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["results"]
+    for r in payload["results"]:
+        bands = r["wealth_percentiles"]
+        assert bands["10"] <= bands["50"] <= bands["90"]
+    assert payload["dca_comparison"]
+
+
+def test_backtest_exit_rule_charges_taxes(workspace, capsys):
+    raw = yaml.safe_load(workspace.read_text())
+    raw["signals"] = {"trend_days": 100}
+    workspace.write_text(yaml.safe_dump(raw))
+    assert run(["backtest", "--exit-rule", "trend"], workspace) == 0
+    out = capsys.readouterr().out
+    assert "stay invested" in out
+    assert "after cash-out" in out
+    assert "trend exit" in out
+
+
 def test_fetch_populates_and_lists_the_cache(workspace, capsys, tmp_path):
     assert run(["fetch"], workspace) == 0
     assert (tmp_path / "cache").exists()

@@ -97,6 +97,33 @@ def test_reserving_the_whole_budget_is_an_error():
         from_dict({**base_config(), "budget": 100, "cash_reserve": 100})
 
 
+def test_tax_contribution_and_signal_sections_parse():
+    cfg = from_dict({
+        **base_config(),
+        "tax": {"short_term_rate": 0.32, "crypto_wash_sale": True},
+        "contribution": {"amount": 250, "frequency": "biweekly"},
+        "signals": {"trend_days": 100},
+        "fee_payback_months": 3,
+    })
+    assert cfg.tax.short_term_rate == 0.32
+    assert cfg.tax.crypto_wash_sale is True
+    assert cfg.tax.long_term_rate == 0.15  # untouched default
+    assert cfg.contribution.amount == 250
+    assert cfg.contribution.frequency == "biweekly"
+    assert cfg.signals.trend_days == 100
+    assert cfg.fee_payback_months == 3.0
+
+
+def test_unknown_contribution_frequency_is_rejected():
+    with pytest.raises(ConfigError, match="frequency"):
+        from_dict({**base_config(), "contribution": {"frequency": "hourly"}})
+
+
+def test_unknown_tax_key_is_reported():
+    with pytest.raises(ConfigError, match="unknown key"):
+        from_dict({**base_config(), "tax": {"shortterm": 0.3}})
+
+
 def test_cash_reserve_is_held_back():
     cfg = from_dict({**base_config(), "budget": 500, "cash_reserve": 200})
     assert cfg.investable == 300

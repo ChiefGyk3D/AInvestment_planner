@@ -73,6 +73,10 @@ class Asset:
     self_custody: bool = False
     #: data-provider symbol override, when it differs from ``symbol``
     data_symbol: str = ""
+    #: a similar-but-not-identical asset to hold during a wash-sale window
+    #: after harvesting a loss here (e.g. VTI -> VOO), so market exposure is
+    #: kept while the loss still counts
+    tlh_replacement: str = ""
 
     @property
     def feed_symbol(self) -> str:
@@ -85,12 +89,22 @@ class Asset:
 
 @dataclass(frozen=True)
 class Holding:
-    """Something you already own."""
+    """One tax lot: a quantity bought at one time for one price.
+
+    Listing each purchase as its own entry (rather than one merged row per
+    symbol) is what makes tax awareness possible: the same symbol can hold a
+    lot with a harvestable loss and a lot with a large gain at once, and the
+    right action differs per lot. ``cost_basis`` is the TOTAL dollars paid for
+    the lot including fees, not the per-unit price. ``acquired`` is an ISO
+    date (YYYY-MM-DD); leave it empty and the lot is treated as long-term
+    with unknown basis, which disables tax analysis for it.
+    """
 
     symbol: str
     quantity: float
     venue: str = ""
     cost_basis: float = 0.0
+    acquired: str = ""
 
 
 @dataclass(frozen=True)

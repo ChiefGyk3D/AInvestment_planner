@@ -15,23 +15,31 @@ from .config import RISK_PROFILES, Config, ConfigError, load_config
 from .custody import review as custody_review
 from .data import PriceCache, load_prices
 from .data.base import ProviderError
+from .lots import review as tax_review
 from .optimize.core import InfeasibleError
 from .optimize.objectives import DESCRIPTIONS, OBJECTIVES
 from .plan import build_plan
+from .project import run_projection
 from .rebalance import holdings_value, plan_rebalance
 from .report import (
     plan_payload,
     render_allocation,
     render_backtest,
     render_custody,
+    render_exit_comparison,
     render_footer,
     render_markdown,
     render_plan,
+    render_projection,
     render_reality_check,
     render_rebalance,
+    render_signals,
+    render_tax,
     table,
     to_json,
 )
+from .signals import buy_and_hold, portfolio_index, trend_overlay
+from .signals import evaluate as evaluate_signals
 from .stats import align_prices, estimate_moments
 from .templates import EXAMPLE_CONFIG
 
@@ -199,6 +207,21 @@ def cmd_backtest(args) -> int:
     if args.objective:
         cfg.optimizer.objective = args.objective
     prices, missing = _prepare(cfg, args)
+
+    if args.exit_rule == "trend":
+        _report_missing(missing)
+        moments = estimate_moments(
+            prices,
+            covariance_shrinkage=cfg.optimizer.covariance_shrinkage,
+            mean_shrinkage=cfg.optimizer.mean_shrinkage,
+        )
+        allocation = optimize_weights(cfg, moments)
+        index = portfolio_index(prices, allocation.as_dict())
+        results = [buy_and_hold(cfg, index), trend_overlay(cfg, index)]
+        print(render_exit_comparison(results, cfg))
+        print(render_footer())
+        return 0
+
     report = run_backtest(
         cfg, prices,
         lookback_days=args.lookback,
@@ -221,6 +244,77 @@ def cmd_backtest(args) -> int:
         return 0
     _report_missing(missing)
     print(render_backtest(report))
+    print(render_footer())
+    return 0
+
+
+def _heading_line(text: str) -> str:
+    return f"\n{text}\n{'=' * len(text)}"
+
+
+def cmd_check(args) -> int:
+    """The monthly ritual, in one command: drift, contributions, taxes, signals."""
+    cfg = load_config(args.config)
+    allocation, prices, panel, missing, _moments = _build(cfg, args)
+    _report_missing(missing)
+
+    held, _values = holdings_value(cfg.holdings, prices)
+    print(f"Portfolio check | holdings ${held:,.2f} | "
+          f"data through {panel.index[-1].date()}")
+
+    # 1. Where does this period's contribution go?
+    contribution = cfg.contribution.amount * (1.0 - cfg.contribution.reserve_fraction)
+    report = plan_rebalance(cfg, allocation, prices, new_cash=contribution)
+    print(render_allocation(allocation))
+    reserve_part = (
+        f", ${cfg.contribution.amount - contribution:,.2f} to reserve)"
+        if cfg.contribution.reserve_fraction > 0 else ")"
+    )
+    print(_heading_line(
+        f"This {cfg.contribution.frequency} contribution "
+        f"(${contribution:,.2f} to invest{reserve_part}"
+    ))
+    print(render_rebalance(report))
+
+    # 2. Tax position.
+    print(render_tax(tax_review(cfg, prices)))
+
+    # 3. Signals.
+    state = evaluate_signals(cfg, panel, allocation.as_dict())
+    print(render_signals(state))
+
+    # 4. Custody.
+    if report.plan is not None:
+        print(render_custody(custody_review(cfg, report.plan)))
+    print(render_footer())
+    return 0
+
+
+def cmd_project(args) -> int:
+    cfg = load_config(args.config)
+    allocation, _prices, panel, missing, _moments = _build(cfg, args)
+    _report_missing(missing)
+    report = run_projection(
+        cfg, panel, allocation.as_dict(),
+        years=args.years, n_paths=args.paths, dca_months=args.dca_months,
+    )
+    if args.json:
+        print(to_json({
+            "disclaimer": DISCLAIMER,
+            "results": [
+                {
+                    "years": r.years, "total_contributed": r.total_contributed,
+                    "wealth_percentiles": r.wealth,
+                    "probability_below_paid_in": r.probability_of_loss,
+                    "median_max_drawdown": r.median_max_drawdown,
+                }
+                for r in report.results
+            ],
+            "dca_comparison": report.dca_comparison,
+            "warnings": report.warnings,
+        }))
+        return 0
+    print(render_projection(report, cfg))
     print(render_footer())
     return 0
 
@@ -317,8 +411,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_bt.add_argument("--objective", choices=OBJECTIVES)
     p_bt.add_argument("--lookback", type=int, default=252, help="rows used to fit each refit")
     p_bt.add_argument("--rebalance-days", type=int, default=63, help="rows between refits")
+    p_bt.add_argument("--exit-rule", choices=["trend"],
+                      help="instead: test an exit rule against staying invested, "
+                           "with taxes and fees charged on every exit")
     p_bt.add_argument("--json", action="store_true")
     p_bt.set_defaults(func=cmd_backtest)
+
+    p_chk = subparsers.add_parser(
+        "check",
+        help="the monthly review: contribution plan, tax position, signals, custody",
+    )
+    common(p_chk)
+    p_chk.set_defaults(func=cmd_check)
+
+    p_prj = subparsers.add_parser(
+        "project", help="Monte Carlo projection of the plan over the long run"
+    )
+    common(p_prj)
+    p_prj.add_argument("--years", type=float, default=10.0)
+    p_prj.add_argument("--paths", type=int, default=3000)
+    p_prj.add_argument("--dca-months", type=int, default=0,
+                       help="also compare lump-sum vs spreading the start over N months")
+    p_prj.add_argument("--json", action="store_true")
+    p_prj.set_defaults(func=cmd_project)
 
     p_exp = subparsers.add_parser("explain", help="show the inputs behind the numbers")
     common(p_exp)

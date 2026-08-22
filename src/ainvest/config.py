@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +93,55 @@ class OptimizerSettings:
 
 
 @dataclass
+class TaxSettings:
+    """What selling costs you beyond fees. US-style two-rate model.
+
+    The rates are marginal, not effective: the harvest maths asks "what would
+    this specific gain or loss change on the tax bill", which happens at the
+    margin. Set both to zero for a tax-sheltered account and the tax logic
+    switches itself off.
+    """
+
+    short_term_rate: float = 0.24
+    long_term_rate: float = 0.15
+    #: a loss must be at least this many dollars before harvesting it is
+    #: suggested -- selling and repurchasing costs two fees and some spread
+    harvest_min_loss: float = 25.0
+    #: ...and must save at least this much estimated tax
+    harvest_min_saving: float = 5.0
+    #: days that define the wash-sale window on each side of a sale
+    wash_sale_days: int = 30
+    #: whether the wash-sale rule is applied to crypto lots. US law applies it
+    #: to "securities", which as of this writing has not included crypto, but
+    #: proposals to change that recur -- verify before relying on it.
+    crypto_wash_sale: bool = False
+    #: warn when selling a gain this close to turning long-term
+    long_term_boundary_days: int = 45
+
+
+@dataclass
+class ContributionSettings:
+    """The steady-investment engine: how much new money arrives, and when."""
+
+    amount: float = 100.0
+    frequency: str = "monthly"  # monthly | biweekly | weekly
+    #: fraction of each contribution held back as dry powder
+    reserve_fraction: float = 0.0
+    #: deploy the reserve when the portfolio is this far below its peak
+    deploy_on_drawdown: float = 0.15
+
+
+@dataclass
+class SignalSettings:
+    """Rules-of-thumb the `check` command evaluates. Alerts, never orders."""
+
+    #: trailing days for the trend moving average (0 disables the signal)
+    trend_days: int = 200
+    #: flag when the portfolio is this far below its running peak
+    drawdown_alert: float = 0.20
+
+
+@dataclass
 class CustodySettings:
     """Rules for when to sweep coins off an exchange into self-custody."""
 
@@ -116,6 +166,12 @@ class Config:
     data: DataSettings = field(default_factory=DataSettings)
     optimizer: OptimizerSettings = field(default_factory=OptimizerSettings)
     custody: CustodySettings = field(default_factory=CustodySettings)
+    tax: TaxSettings = field(default_factory=TaxSettings)
+    contribution: ContributionSettings = field(default_factory=ContributionSettings)
+    signals: SignalSettings = field(default_factory=SignalSettings)
+    #: months within which a trade's fee must be earned back by the expected
+    #: return on the amount traded, or the trade is skipped as not worth it
+    fee_payback_months: float = 6.0
     rebalance_band: float = 0.05
     min_trade: float = 5.0
     allow_sells: bool = False
@@ -273,6 +329,16 @@ def from_dict(raw: dict[str, Any]) -> Config:
     _fill(cfg.data, raw.get("data"), "data")
     _fill(cfg.optimizer, raw.get("optimizer"), "optimizer")
     _fill(cfg.custody, raw.get("custody"), "custody")
+    _fill(cfg.tax, raw.get("tax"), "tax")
+    _fill(cfg.contribution, raw.get("contribution"), "contribution")
+    _fill(cfg.signals, raw.get("signals"), "signals")
+    if "fee_payback_months" in raw:
+        cfg.fee_payback_months = _as_float(raw["fee_payback_months"], "fee_payback_months")
+    if cfg.contribution.frequency not in {"monthly", "biweekly", "weekly"}:
+        raise ConfigError(
+            f"contribution.frequency {cfg.contribution.frequency!r} is not one of "
+            "monthly, biweekly, weekly"
+        )
     cfg.constraints.validate()
 
     venues_raw = raw.get("venues") or {}
@@ -301,9 +367,19 @@ def from_dict(raw: dict[str, Any]) -> Config:
             quantity=_as_float(h.get("quantity", 0.0), "holdings.quantity"),
             venue=str(h.get("venue", "")),
             cost_basis=_as_float(h.get("cost_basis", 0.0), "holdings.cost_basis"),
+            acquired=str(h.get("acquired", "")),
         )
         for h in holdings_raw
     ]
+    for h in cfg.holdings:
+        if h.acquired:
+            try:
+                date.fromisoformat(h.acquired)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"holding {h.symbol!r} has acquired={h.acquired!r}; "
+                    "expected an ISO date like 2025-11-30"
+                ) from exc
     unknown_holdings = {h.symbol for h in cfg.holdings} - seen
     if unknown_holdings:
         raise ConfigError(

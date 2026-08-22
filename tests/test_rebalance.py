@@ -122,12 +122,12 @@ def test_sells_never_exceed_what_is_held():
             assert trade.notional <= 1000.0 + 1e-6
 
 
-def test_a_trade_whose_fee_swamps_it_is_skipped():
+def test_a_trade_whose_fee_fails_the_payback_gate_is_skipped():
     """A small correction is not worth paying a large flat fee to make.
 
     Holdings here sit close to target, so the only drift worth trading is a
-    $30 slice of VTI -- against a $20 flat fee. Making that trade would cost
-    two thirds of the amount being corrected.
+    $30 slice of VTI -- against a $20 flat fee. No expected return earns that
+    back inside the payback window.
     """
     raw = base_config(allow_sells=True, min_trade=0.01, rebalance_band=0.01)
     raw["venues"]["public"]["fixed_fee"] = 20.0
@@ -140,8 +140,35 @@ def test_a_trade_whose_fee_swamps_it_is_skipped():
     ]
     cfg = from_dict(raw)
     report = plan_rebalance(cfg, EVEN, PRICES, new_cash=0, allow_sells=True)
-    assert any("quarter of" in reason for _, reason in report.skipped), report.skipped
+    assert any("payback gate" in reason for _, reason in report.skipped), report.skipped
     assert not any(t.symbol == "VTI" for t in report.plan.trades)
+
+
+def test_buys_are_gated_on_fee_payback():
+    """A venue whose fee cannot be earned back within the window is not used
+    for a small buy, even when the asset is underweight."""
+    raw = base_config(fee_payback_months=6)
+    raw["venues"]["coinbase_advanced"]["fixed_fee"] = 5.0  # $5 on a ~$40 buy
+    raw["holdings"] = [{"symbol": "VTI", "quantity": 6.0, "venue": "public"}]
+    cfg = from_dict(raw)
+    report = plan_rebalance(cfg, EVEN, PRICES, new_cash=100)
+    skipped_crypto = [s for s, r in report.skipped if "months of expected return" in r]
+    assert skipped_crypto, report.skipped
+    assert not any(t.symbol in {"BTC", "ETH"} for t in report.plan.trades)
+
+
+def test_selling_a_gain_surfaces_its_estimated_tax():
+    """A sell's real cost is fee plus the tax it realises; the report says so."""
+    from datetime import date, timedelta
+    acquired = (date.today() - timedelta(days=400)).isoformat()
+    raw = base_config(allow_sells=True, rebalance_band=0.01)
+    raw["holdings"] = [{
+        "symbol": "VTI", "quantity": 10.0, "venue": "public",
+        "cost_basis": 400.0, "acquired": acquired,  # $1000 value, $600 LT gain
+    }]
+    cfg = from_dict(raw)
+    report = plan_rebalance(cfg, EVEN, PRICES, new_cash=0, allow_sells=True)
+    assert any("realises an estimated" in n for n in report.notes), report.notes
 
 
 def test_an_empty_portfolio_with_no_cash_is_reported():
